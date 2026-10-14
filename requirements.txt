@@ -1,6 +1,6 @@
-Flask
-Flask-SocketIO
-qrcode
-Pillow
-gunicorn
-eventlet
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+qrcode==7.4.2
+Pillow==10.0.1
+gunicorn==21.2.0
+eventlet==0.33.3
