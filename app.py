@@ -7,13 +7,14 @@ import zipfile
 import threading
 import random
 import traceback
+import re
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
 from flask_socketio import SocketIO, emit
 import qrcode
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'neon-ultimate-vault-v3'
+app.config['SECRET_KEY'] = 'neon-ultimate-vault-v4'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 app.config['MAX_CONTENT_LENGTH'] = 1000 * 1024 * 1024  # 1GB Max
@@ -35,6 +36,8 @@ FILES_FOR_LAPTOP = {}
 # SEND VARIABLES (Laptop -> Phone)
 SEND_PIN = ""
 FILES_FOR_PHONE = {}
+
+CONNECTED_DEVICES = {}
 
 # ================= BACKGROUND THREAD (SELF-DESTRUCT) =================
 def auto_destruct_worker():
@@ -171,11 +174,8 @@ def handle_upload():
                 file.save(final_path)
                 FILES_FOR_LAPTOP[final_path] = time.time()
 
-        # Update laptop via robust fetch mechanism
-        socketio.emit('refresh_uploads')
         return jsonify({'status': 'success'})
     except Exception as e:
-        print("Upload Error:", traceback.format_exc())
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
 @app.route('/api/share_to_phone', methods=['POST'])
@@ -219,11 +219,9 @@ def share_to_phone():
         url = f"{host_url}/auth?token={SESSION_TOKEN}&action=share"
         qr_b64 = generate_qr_base64(url, 'share')
         
-        socketio.emit('refresh_downloads')
         return jsonify({'status': 'success', 'pin': SEND_PIN, 'qr': qr_b64})
     
     except Exception as e:
-        print("Share Error:", traceback.format_exc())
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
 @app.route('/api/list_received')
@@ -236,16 +234,25 @@ def list_shared():
     files = [os.path.basename(f) for f in FILES_FOR_PHONE.keys() if os.path.exists(f)]
     return jsonify({'files': files})
 
+# ================= SOCKET EVENTS =================
 @socketio.on('connect')
 def handle_connect():
-    ua = request.headers.get('User-Agent', 'Unknown Device')
-    CONNECTED_DEVICES[request.sid] = "📱 Mobile" if "Mobile" in ua else "💻 Laptop"
+    ua = request.headers.get('User-Agent', '')
+    is_mobile = bool(re.search(r'Mobile|Android|iPhone|iPad', ua))
+    CONNECTED_DEVICES[request.sid] = "📱 Mobile Device" if is_mobile else "💻 Command Node"
     emit('update_radar', {'devices': list(CONNECTED_DEVICES.values())}, broadcast=True)
 
 @socketio.on('disconnect')
 def handle_disconnect():
     if request.sid in CONNECTED_DEVICES: del CONNECTED_DEVICES[request.sid]
     emit('update_radar', {'devices': list(CONNECTED_DEVICES.values())}, broadcast=True)
+
+# 100% RELIABLE TRIGGER: Called directly from client JS when upload is fully done
+@socketio.on('notify_upload')
+def handle_notify_upload():
+    emit('refresh_uploads', broadcast=True)
+    emit('refresh_downloads', broadcast=True)
+
 
 # ================= HTML / JS TEMPLATE =================
 HTML_TEMPLATE = """
@@ -257,18 +264,44 @@ HTML_TEMPLATE = """
     <title>🌈 NEON CLOUD VAULT 🌈</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
     <style>
-        :root { --bg: #090914; --cyan: #00f3ff; --pink: #ff007f; --green: #00ff66; --orange: #ff6600; --purple: #9d00ff; --text: #ffffff; }
+        :root { --bg: #05050a; --cyan: #00f3ff; --pink: #ff007f; --green: #00ff66; --orange: #ff6600; --purple: #9d00ff; --text: #ffffff; }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
-        body { background-color: var(--bg); color: var(--text); padding: 15px; display: flex; justify-content: center; align-items: center; min-height: 100vh;}
         
-        .box { background: linear-gradient(145deg, rgba(20,20,35,0.95), rgba(10,10,20,0.95)); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 32px rgba(0,0,0,0.5); position: relative;}
-        .box-cyan { border-top: 3px solid var(--cyan); box-shadow: 0 -5px 20px rgba(0,243,255,0.15); }
-        .box-pink { border-top: 3px solid var(--pink); box-shadow: 0 -5px 20px rgba(255,0,127,0.15); }
-        .box-orange { border-top: 3px solid var(--orange); box-shadow: 0 -5px 20px rgba(255,102,0,0.15); }
-        .box-purple { border-top: 3px solid var(--purple); box-shadow: 0 -5px 20px rgba(157,0,255,0.15); }
+        /* TECH ANIMATED BACKGROUND */
+        body { 
+            background-color: var(--bg); color: var(--text); padding: 15px; display: flex; justify-content: center; align-items: center; min-height: 100vh;
+            background-image: 
+                radial-gradient(circle at center, rgba(157, 0, 255, 0.15) 0%, transparent 60%),
+                linear-gradient(rgba(0, 243, 255, 0.05) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 243, 255, 0.05) 1px, transparent 1px);
+            background-size: 100% 100%, 40px 40px, 40px 40px;
+            animation: gridMove 20s linear infinite;
+        }
+        @keyframes gridMove {
+            0% { background-position: center, 0px 0px, 0px 0px; }
+            100% { background-position: center, 40px 40px, 40px 40px; }
+        }
         
-        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1000px; width: 100%; }
-        h2 { margin-bottom: 15px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 10px currentColor;}
+        .box { background: linear-gradient(145deg, rgba(15,15,25,0.95), rgba(5,5,15,0.95)); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.05); box-shadow: 0 10px 40px rgba(0,0,0,0.7); position: relative;}
+        .box-cyan { border-top: 3px solid var(--cyan); box-shadow: 0 -5px 25px rgba(0,243,255,0.2); }
+        .box-pink { border-top: 3px solid var(--pink); box-shadow: 0 -5px 25px rgba(255,0,127,0.2); }
+        .box-orange { border-top: 3px solid var(--orange); box-shadow: 0 -5px 25px rgba(255,102,0,0.2); }
+        .box-purple { border-top: 3px solid var(--purple); box-shadow: 0 -5px 25px rgba(157,0,255,0.2); overflow: hidden; }
+        
+        /* RADAR SCAN EFFECT */
+        .radar-scan-line {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 3px;
+            background: var(--purple);
+            box-shadow: 0 0 15px var(--purple), 0 0 30px var(--purple);
+            animation: scanRadar 3s linear infinite;
+            z-index: 0;
+            opacity: 0.7;
+        }
+        @keyframes scanRadar { 0% { top: -10%; opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { top: 110%; opacity: 0; } }
+        
+        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 25px; max-width: 1000px; width: 100%; position: relative; z-index: 1;}
+        h2 { margin-bottom: 15px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 10px currentColor; position: relative; z-index: 2;}
         .pin-display { font-size: 3.5rem; letter-spacing: 15px; text-align: center; font-weight: 900; color: var(--text); text-shadow: 0 0 20px currentColor; margin: 15px 0;}
         
         .btn { background: linear-gradient(45deg, var(--purple), var(--pink)); color: var(--text); padding: 15px; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; width: 100%; text-transform: uppercase; font-weight: bold; font-size: 1.1rem;}
@@ -280,7 +313,7 @@ HTML_TEMPLATE = """
         .btn-action:hover { background: #fff; box-shadow: 0 0 15px #fff; transform: scale(1.05); }
 
         .home-container { display: flex; gap: 50px; justify-content: center; align-items: center; flex-wrap: wrap; }
-        .big-circle { width: 250px; height: 250px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; cursor: pointer; transition: 0.4s; background: #111; border: 4px solid rgba(255,255,255,0.1); box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        .big-circle { width: 250px; height: 250px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; cursor: pointer; transition: 0.4s; background: rgba(10,10,15,0.8); border: 4px solid rgba(255,255,255,0.1); box-shadow: 0 0 30px rgba(0,0,0,0.5); backdrop-filter: blur(5px);}
         .big-circle h1 { font-size: 5rem; margin-bottom: 10px; text-shadow: 0 0 20px currentColor;}
         .big-circle h2 { font-size: 1.8rem; font-weight: 900; text-shadow: 0 0 10px currentColor; color: #fff;}
         .circle-receive:hover { border-color: var(--cyan); box-shadow: 0 0 50px var(--cyan); transform: scale(1.05); }
@@ -291,13 +324,13 @@ HTML_TEMPLATE = """
         .progress-circle { width: 120px; height: 120px; border-radius: 50%; background: conic-gradient(var(--orange) 0%, #222 0%); display: flex; align-items: center; justify-content: center; margin: 20px auto; box-shadow: 0 0 15px rgba(255, 102, 0, 0.4); }
         .progress-circle-inner { width: 100px; height: 100px; border-radius: 50%; background: var(--bg); display: flex; align-items: center; justify-content: center; font-size: 1.8rem; font-weight: bold; color: var(--orange); text-shadow: 0 0 10px var(--orange); }
         
-        .file-list-item { padding: 15px; background: rgba(0,0,0,0.5); border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--cyan); transition: 0.3s; display: flex; justify-content: space-between; align-items: center;}
+        .file-list-item { padding: 15px; background: rgba(0,0,0,0.5); border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--cyan); transition: 0.3s; display: flex; justify-content: space-between; align-items: center; position: relative; z-index: 2;}
         
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
         .blinking-text { animation: blink 1.5s infinite; color: var(--orange); text-align: center; margin-top: 15px; font-weight: bold; font-size: 1.2rem;}
         
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
-        .modal-content { background: #111; padding: 40px; border-radius: 20px; border: 2px solid var(--cyan); text-align: center; box-shadow: 0 0 30px var(--cyan); animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        .modal-content { background: #111; padding: 40px; border-radius: 20px; border: 2px solid var(--cyan); text-align: center; box-shadow: 0 0 40px var(--cyan); animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
         @keyframes popIn { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 
         @media (max-width: 800px) { .grid-container { grid-template-columns: 1fr; } }
@@ -346,14 +379,16 @@ HTML_TEMPLATE = """
             
             <div style="display:flex; flex-direction:column; gap:20px;">
                 <div class="box box-purple">
+                    <div class="radar-scan-line"></div>
                     <h2 style="color:var(--purple)">📡 CONNECTED RADAR</h2>
-                    <ul id="device-list" style="list-style:none; color:#ddd; font-size:0.95rem;"><li>Scanning...</li></ul>
+                    <ul id="device-list" style="list-style:none; color:#ddd; font-size:1.1rem; position:relative; z-index:2;">
+                        <li>Scanning network...</li>
+                    </ul>
                 </div>
                 <div class="box box-pink" style="flex-grow:1;">
                     <h2 style="color:var(--pink)">📥 CLOUD FILES RECEIVED</h2>
-                    <button class="btn-action" style="background:var(--cyan); color:#000; margin-bottom:15px; width:auto; padding:5px 15px;" onclick="fetchReceivedFiles()">🔄 REFRESH</button>
-                    <div id="file-list" style="height:250px; overflow-y:auto; padding-right:5px;">
-                        <p style="color:#555; font-style:italic;">No files yet...</p>
+                    <div id="file-list" style="height:200px; overflow-y:auto; padding-right:5px;">
+                        <p style="color:#555; font-style:italic;">Listening for files...</p>
                     </div>
                 </div>
             </div>
@@ -394,7 +429,7 @@ HTML_TEMPLATE = """
         const socket = io();
 
         socket.on('clear_files', () => {
-            document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">No files yet...</p>';
+            document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">Listening for files...</p>';
         });
 
         function goHome() {
@@ -481,12 +516,7 @@ HTML_TEMPLATE = """
             xhr.onload = function() {
                 try {
                     if (xhr.status !== 200) {
-                        let errorMsg = "Unknown Server Error";
-                        try {
-                            let res = JSON.parse(xhr.responseText);
-                            errorMsg = res.msg || errorMsg;
-                        } catch(e) {}
-                        alert("Upload failed! Status: " + xhr.status + "\\nReason: " + errorMsg);
+                        alert("Upload failed! Status: " + xhr.status);
                         resetSendProcess();
                         return;
                     }
@@ -504,6 +534,9 @@ HTML_TEMPLATE = """
                         
                         document.getElementById('success-modal').style.display = 'flex';
                         document.getElementById('share-input').value = ""; 
+                        
+                        // 100% Reliable Server Notification trigger
+                        socket.emit('notify_upload');
                     }
                 } catch(err) {
                     alert("Processing Error! Try again.");
@@ -519,13 +552,13 @@ HTML_TEMPLATE = """
             xhr.send(fd);
         }
 
-        // NEW: Highly robust fetch mechanism for laptop (Same as phone)
+        // PERFECT AUTO REFRESH FOR LAPTOP 
         window.fetchReceivedFiles = function() {
             fetch('/api/list_received')
             .then(r=>r.json()).then(data => {
                 let list = document.getElementById('file-list');
                 if(data.files.length === 0) { 
-                    list.innerHTML = '<p style="color:#555; text-align:center;">Empty...</p>'; 
+                    list.innerHTML = '<p style="color:#555; text-align:center;">Listening for files...</p>'; 
                     return; 
                 }
                 list.innerHTML = '';
@@ -544,18 +577,19 @@ HTML_TEMPLATE = """
             });
         }
         
+        // This receives the ping and auto-updates the UI
         socket.on('refresh_uploads', () => { fetchReceivedFiles(); });
 
         socket.on('update_radar', (data) => {
             let list = document.getElementById('device-list');
-            list.innerHTML = data.devices.length ? '' : '<li>No nodes found...</li>';
-            data.devices.forEach(d => list.innerHTML += `<li style="margin-bottom:5px;">🟢 ${d}</li>`);
+            list.innerHTML = data.devices.length ? '' : '<li>Scanning network...</li>';
+            data.devices.forEach(d => list.innerHTML += `<li style="margin-bottom:8px; font-weight:bold; text-shadow: 0 0 10px var(--purple);">🟢 ${d}</li>`);
         });
     </script>
 
     {% elif mode == 'phone_auth' %}
     <style>
-        .phone-container { width: 100%; max-width: 400px; margin: 20px auto; }
+        .phone-container { width: 100%; max-width: 400px; margin: 20px auto; position: relative; z-index:2;}
         .pin-input { font-size: 2rem; width: 180px; text-align: center; background: #111; color: var(--cyan); border: 2px solid var(--cyan); border-radius: 8px; padding: 10px; margin: 20px 0; outline: none; }
         .swipe-container { width: 100%; background: #222; border-radius: 50px; height: 60px; position: relative; margin-top: 20px; border: 2px solid var(--cyan); display: none;}
         .swipe-slider { width: 60px; height: 60px; background: linear-gradient(45deg, var(--cyan), var(--purple)); border-radius: 50px; position: absolute; left: 0; top: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2; font-size: 1.5rem; transition: left 0.1s; box-shadow: 0 0 15px var(--cyan);}
@@ -674,14 +708,7 @@ HTML_TEMPLATE = """
 
                 xhr.onload = () => {
                     try {
-                        if(xhr.status !== 200) {
-                            let errorMsg = "Unknown Error";
-                            try {
-                                let res = JSON.parse(xhr.responseText);
-                                errorMsg = res.msg || errorMsg;
-                            } catch(e) {}
-                            throw new Error(errorMsg);
-                        }
+                        if(xhr.status !== 200) { throw new Error("Upload Failed"); }
                         alert("Files Sent to Laptop Successfully! 🚀");
                         document.getElementById('progress-container').style.display = 'none';
                         document.getElementById('progress-text').innerText = "0%";
@@ -690,6 +717,10 @@ HTML_TEMPLATE = """
                         document.getElementById('file-input').value = ""; 
                         document.getElementById('selection-text').innerText = "";
                         swipeBox.style.display = 'none';
+                        
+                        // 100% Reliable Server Notification trigger
+                        socket.emit('notify_upload');
+                        
                     } catch(e) {
                         alert("Error uploading files! \\nReason: " + e.message);
                         document.getElementById('progress-container').style.display = 'none';
