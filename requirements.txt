@@ -3,4 +3,3 @@ Flask-SocketIO
 qrcode
 Pillow
 gunicorn
-eventlet
