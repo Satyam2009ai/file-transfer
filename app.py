@@ -13,8 +13,7 @@ import qrcode
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'neon-ultimate-vault-v2'
-# Allow cross origin and use standard polling/websocket
+app.config['SECRET_KEY'] = 'neon-ultimate-vault-v3'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 app.config['MAX_CONTENT_LENGTH'] = 1000 * 1024 * 1024  # 1GB Max
@@ -44,6 +43,7 @@ def auto_destruct_worker():
         current_time = time.time()
         
         # 1. Clean LAPTOP RECEIVE Files
+        laptop_changed = False
         for filepath, timestamp in list(FILES_FOR_LAPTOP.items()):
             if current_time - timestamp > 60:  # 60 seconds auto-delete
                 if os.path.exists(filepath): 
@@ -51,10 +51,13 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_LAPTOP:
                     del FILES_FOR_LAPTOP[filepath]
-                # Update frontend
-                socketio.emit('file_destructed', {'filename': os.path.basename(filepath)})
+                laptop_changed = True
+        
+        if laptop_changed:
+            socketio.emit('refresh_uploads')
                 
         # 2. Clean PHONE DOWNLOAD Files
+        phone_changed = False
         for filepath, timestamp in list(FILES_FOR_PHONE.items()):
             if current_time - timestamp > 60:  # 60 seconds auto-delete
                 if os.path.exists(filepath): 
@@ -62,8 +65,10 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_PHONE:
                     del FILES_FOR_PHONE[filepath]
-                # Update frontend
-                socketio.emit('refresh_downloads')
+                phone_changed = True
+                
+        if phone_changed:
+            socketio.emit('refresh_downloads')
 
 threading.Thread(target=auto_destruct_worker, daemon=True).start()
 
@@ -158,7 +163,6 @@ def handle_upload():
                         zipf.write(temp_path, arcname=safe_name)
                         os.remove(temp_path)
             FILES_FOR_LAPTOP[zip_path] = time.time()
-            socketio.emit('file_completed', {'filename': zip_filename})
         else:
             file = files[0]
             if file.filename:
@@ -166,8 +170,9 @@ def handle_upload():
                 final_path = os.path.join(UPLOAD_FOLDER, safe_filename)
                 file.save(final_path)
                 FILES_FOR_LAPTOP[final_path] = time.time()
-                socketio.emit('file_completed', {'filename': safe_filename})
 
+        # Update laptop via robust fetch mechanism
+        socketio.emit('refresh_uploads')
         return jsonify({'status': 'success'})
     except Exception as e:
         print("Upload Error:", traceback.format_exc())
@@ -209,7 +214,6 @@ def share_to_phone():
                 file.save(save_path)
                 FILES_FOR_PHONE[save_path] = time.time()
                 
-        # Generate new PIN and QR
         SEND_PIN = str(random.randint(1000, 9999))
         host_url = request.host_url.rstrip('/')
         url = f"{host_url}/auth?token={SESSION_TOKEN}&action=share"
@@ -221,6 +225,11 @@ def share_to_phone():
     except Exception as e:
         print("Share Error:", traceback.format_exc())
         return jsonify({'status': 'error', 'msg': str(e)}), 500
+
+@app.route('/api/list_received')
+def list_received():
+    files = [os.path.basename(f) for f in FILES_FOR_LAPTOP.keys() if os.path.exists(f)]
+    return jsonify({'files': files})
 
 @app.route('/api/list_shared')
 def list_shared():
@@ -342,6 +351,7 @@ HTML_TEMPLATE = """
                 </div>
                 <div class="box box-pink" style="flex-grow:1;">
                     <h2 style="color:var(--pink)">📥 CLOUD FILES RECEIVED</h2>
+                    <button class="btn-action" style="background:var(--cyan); color:#000; margin-bottom:15px; width:auto; padding:5px 15px;" onclick="fetchReceivedFiles()">🔄 REFRESH</button>
                     <div id="file-list" style="height:250px; overflow-y:auto; padding-right:5px;">
                         <p style="color:#555; font-style:italic;">No files yet...</p>
                     </div>
@@ -401,6 +411,7 @@ HTML_TEMPLATE = """
                 document.getElementById('receive-pin').innerText = data.pin;
                 document.getElementById('qr-receive-img').src = data.qr;
             });
+            fetchReceivedFiles();
         }
 
         function openSend() {
@@ -508,34 +519,37 @@ HTML_TEMPLATE = """
             xhr.send(fd);
         }
 
+        // NEW: Highly robust fetch mechanism for laptop (Same as phone)
+        window.fetchReceivedFiles = function() {
+            fetch('/api/list_received')
+            .then(r=>r.json()).then(data => {
+                let list = document.getElementById('file-list');
+                if(data.files.length === 0) { 
+                    list.innerHTML = '<p style="color:#555; text-align:center;">Empty...</p>'; 
+                    return; 
+                }
+                list.innerHTML = '';
+                data.files.forEach(f => {
+                    let safeF = encodeURIComponent(f);
+                    let url = `/get_file/${safeF}`;
+                    list.innerHTML += `
+                    <div class="file-list-item" style="border-left-color:var(--cyan);">
+                        <div style="font-weight:bold; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:50%;" title="${f}">${f}</div>
+                        <div style="display:flex; gap:5px;">
+                            <button class="btn-action btn-view" onclick="window.open('${url}', '_blank')">VIEW</button>
+                            <a href="${url}" download class="btn-action btn-down" style="background:var(--cyan); box-shadow: 0 0 10px var(--cyan);">SAVE</a>
+                        </div>
+                    </div>`;
+                });
+            });
+        }
+        
+        socket.on('refresh_uploads', () => { fetchReceivedFiles(); });
+
         socket.on('update_radar', (data) => {
             let list = document.getElementById('device-list');
             list.innerHTML = data.devices.length ? '' : '<li>No nodes found...</li>';
             data.devices.forEach(d => list.innerHTML += `<li style="margin-bottom:5px;">🟢 ${d}</li>`);
-        });
-
-        socket.on('file_completed', (data) => {
-            let list = document.getElementById('file-list');
-            if(list.innerText.includes('No files')) list.innerHTML = '';
-            
-            let safeId = data.filename.replace(/[^a-zA-Z0-9]/g, "");
-            let safeFilename = encodeURIComponent(data.filename);
-            let fileURL = `/get_file/${safeFilename}`;
-            
-            list.innerHTML = `
-            <div class="file-list-item" id="file-${safeId}">
-                <div style="font-weight:bold; color:var(--cyan); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:50%;" title="${data.filename}">${data.filename}</div>
-                <div style="display:flex; gap:8px;">
-                    <button class="btn-action btn-view" onclick="window.open('${fileURL}', '_blank')">VIEW</button>
-                    <a href="${fileURL}" download class="btn-action btn-down">SAVE</a>
-                </div>
-            </div>` + list.innerHTML;
-        });
-
-        socket.on('file_destructed', (data) => {
-            let safeId = data.filename.replace(/[^a-zA-Z0-9]/g, "");
-            let el = document.getElementById(`file-${safeId}`);
-            if(el) el.innerHTML = `<span style="color:var(--pink); text-decoration:line-through; font-weight:bold; width:100%; text-align:center;">${data.filename} (DESTROYED)</span>`;
         });
     </script>
 
