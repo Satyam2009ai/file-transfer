@@ -171,14 +171,19 @@ HTML_TEMPLATE = """
         .pin-display { font-size: 2.8rem; letter-spacing: 12px; text-align: center; font-weight: 800; color: var(--cyan); text-shadow: 0 0 15px var(--cyan); margin: 5px 0;}
         .btn { background: linear-gradient(45deg, var(--purple), var(--pink)); color: var(--text); padding: 12px; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; width: 100%; text-transform: uppercase; font-weight: bold;}
         .btn:hover { filter: brightness(1.2); transform: scale(1.02); }
-        .btn-view { background: var(--cyan); color: #000; border: none; padding: 5px 12px; border-radius: 5px; font-weight: bold; cursor: pointer; float: right; box-shadow: 0 0 10px var(--cyan); }
-        .btn-view:hover { background: #fff; box-shadow: 0 0 15px #fff; }
+        
+        /* New Button Styles */
+        .btn-action { color: #000; border: none; padding: 6px 12px; border-radius: 5px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 0.8rem; text-align: center; display: inline-block; transition: 0.2s;}
+        .btn-view { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
+        .btn-down { background: var(--green); box-shadow: 0 0 10px var(--green); }
+        .btn-action:hover { background: #fff; box-shadow: 0 0 15px #fff; transform: scale(1.05); }
+
         .phone-container { width: 100%; max-width: 400px; margin: 20px auto; }
         .pin-input { font-size: 2rem; width: 180px; text-align: center; background: #111; color: var(--cyan); border: 2px solid var(--cyan); border-radius: 8px; padding: 10px; margin: 20px 0; outline: none; }
         .swipe-container { width: 100%; background: #222; border-radius: 50px; height: 60px; position: relative; margin-top: 20px; border: 2px solid var(--cyan); display: none;}
         .swipe-slider { width: 60px; height: 60px; background: linear-gradient(45deg, var(--cyan), var(--purple)); border-radius: 50px; position: absolute; left: 0; top: 0; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2; font-size: 1.5rem; transition: left 0.1s; box-shadow: 0 0 15px var(--cyan);}
         .swipe-text { position: absolute; width: 100%; line-height: 60px; color: #fff; font-weight: bold; z-index: 1; pointer-events: none; text-align: center; }
-        .file-list-item { padding: 12px; background: rgba(0,0,0,0.5); border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--cyan); transition: 0.3s;}
+        .file-list-item { padding: 12px; background: rgba(0,0,0,0.5); border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--cyan); transition: 0.3s; display: flex; justify-content: space-between; align-items: center;}
         
         /* Circular Progress */
         .progress-circle { width: 120px; height: 120px; border-radius: 50%; background: conic-gradient(var(--cyan) 0%, #222 0%); display: flex; align-items: center; justify-content: center; margin: 20px auto; display: none; box-shadow: 0 0 15px rgba(0, 243, 255, 0.4); }
@@ -317,15 +322,18 @@ HTML_TEMPLATE = """
             
             list.innerHTML = `
             <div class="file-list-item" id="file-${safeId}">
-                <button class="btn-view" onclick="window.location.href='${fileURL}'">GET</button>
-                <div style="font-weight:bold; color:var(--cyan); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:70%;">${data.filename}</div>
+                <div style="font-weight:bold; color:var(--cyan); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:50%;" title="${data.filename}">${data.filename}</div>
+                <div style="display:flex; gap:8px;">
+                    <button class="btn-action btn-view" onclick="window.open('${fileURL}', '_blank')">VIEW</button>
+                    <a href="${fileURL}" download class="btn-action btn-down">DOWNLOAD</a>
+                </div>
             </div>` + list.innerHTML;
         });
 
         socket.on('file_destructed', (data) => {
             let safeId = data.filename.replace(/[^a-zA-Z0-9]/g, "");
             let el = document.getElementById(`file-${safeId}`);
-            if(el) el.innerHTML = `<span style="color:var(--pink); text-decoration:line-through; font-weight:bold;">${data.filename} (DESTROYED)</span>`;
+            if(el) el.innerHTML = `<span style="color:var(--pink); text-decoration:line-through; font-weight:bold; width:100%; text-align:center;">${data.filename} (DESTROYED)</span>`;
         });
     </script>
 
@@ -470,8 +478,11 @@ HTML_TEMPLATE = """
                     let url = `/get_file/${safeF}`;
                     list.innerHTML += `
                     <div class="file-list-item" style="border-left-color:var(--orange);">
-                        <a href="${url}" download class="btn-view" style="background:var(--orange); text-decoration:none;">GET</a>
-                        <div style="font-weight:bold; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:75%;">${f}</div>
+                        <div style="font-weight:bold; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:50%;" title="${f}">${f}</div>
+                        <div style="display:flex; gap:5px;">
+                            <button class="btn-action btn-view" onclick="window.open('${url}', '_blank')">VIEW</button>
+                            <a href="${url}" download class="btn-action btn-down" style="background:var(--orange); box-shadow: 0 0 10px var(--orange);">SAVE</a>
+                        </div>
                     </div>`;
                 });
             });
