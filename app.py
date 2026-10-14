@@ -28,13 +28,17 @@ SECURITY_PIN = ""
 CONNECTED_DEVICES = {} 
 SHARED_FILES_DB = {}   
 
-# --- CORE RESET FUNCTION ---
-def reset_system_state():
-    """Ye function purana data clear karega aur naya PIN/Token banayega"""
-    global SESSION_TOKEN, SECURITY_PIN, SHARED_FILES_DB
-    
+# --- AUTH & RESET FUNCTIONS ---
+def generate_new_auth():
+    """Sirf naya PIN aur Token banata hai"""
+    global SESSION_TOKEN, SECURITY_PIN
     SESSION_TOKEN = str(uuid.uuid4().hex)[:10]
     SECURITY_PIN = str(random.randint(1000, 9999))
+    return SECURITY_PIN, SESSION_TOKEN
+
+def reset_system_state():
+    """Purana data clear karega aur naya PIN/Token banayega"""
+    generate_new_auth()
     
     # 1. Clear database memory
     SHARED_FILES_DB.clear()
@@ -50,8 +54,6 @@ def reset_system_state():
             
     # 3. Tell frontend to clear old files & history from screen
     socketio.emit('clear_files')
-    # 4. Tell frontend to update PIN dynamically
-    socketio.emit('update_pin', {'pin': SECURITY_PIN})
     
     return SECURITY_PIN, SESSION_TOKEN
 
@@ -100,8 +102,9 @@ def generate_qr_base64(url, action):
 # ================= ROUTES =================
 @app.route('/')
 def index():
-    pin, token = reset_system_state()
-    return render_template_string(HTML_TEMPLATE, mode='laptop', pin=pin, token=token)
+    # Jab page refresh hoga tab sab clear ho jayega
+    reset_system_state()
+    return render_template_string(HTML_TEMPLATE, mode='laptop')
 
 @app.route('/auth')
 def phone_view():
@@ -119,10 +122,10 @@ def verify_pin():
 
 @app.route('/api/qr/<action>')
 def get_qr(action):
-    pin, token = reset_system_state()
+    # Dhyan dein: Yahan ab PIN change nahi ho raha hai (Fixed Issue)
     host_url = request.host_url.rstrip('/')
-    url = f"{host_url}/auth?token={token}&action={action}"
-    return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': pin})
+    url = f"{host_url}/auth?token={SESSION_TOKEN}&action={action}"
+    return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': SECURITY_PIN})
 
 @app.route('/get_file/<path:filename>')
 def get_file(filename):
@@ -161,6 +164,10 @@ def share_to_phone():
             save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
             file.save(save_path)
             SHARED_FILES_DB[save_path] = time.time()
+            
+    # Nayi file attach hui -> Automatically Naya PIN/Token Generate karo
+    generate_new_auth()
+    
     socketio.emit('refresh_downloads', broadcast=True)
     return jsonify({'status': 'success'})
 
@@ -198,7 +205,7 @@ HTML_TEMPLATE = """
         .box-pink { border-top: 3px solid var(--pink); box-shadow: 0 -5px 20px rgba(255,0,127,0.15); }
         .box-orange { border-top: 3px solid var(--orange); box-shadow: 0 -5px 20px rgba(255,102,0,0.15); }
         .box-purple { border-top: 3px solid var(--purple); box-shadow: 0 -5px 20px rgba(157,0,255,0.15); }
-        .box-green { border-top: 3px solid var(--green); box-shadow: 0 -5px 20px rgba(0,255,102,0.15); } /* New Green Box for History */
+        .box-green { border-top: 3px solid var(--green); box-shadow: 0 -5px 20px rgba(0,255,102,0.15); } 
         
         .grid-container { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 20px; max-width: 1500px; width: 100%; }
         h2 { margin-bottom: 15px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 10px currentColor;}
@@ -250,7 +257,8 @@ HTML_TEMPLATE = """
             <div class="box box-cyan">
                 <button class="btn-action btn-refresh" onclick="window.location.reload()">🔄 RESET</button>
                 <h2 style="color:var(--cyan)">📥 RECEIVE FROM PHONE</h2>
-                <div class="pin-display" id="laptop-pin">{{ pin }}</div>
+                <!-- HIDDEN PIN INITIALLY -->
+                <div class="pin-display" id="laptop-pin">****</div>
                 <button class="btn" onclick="showQR('receive')" style="background:var(--cyan); color:#000;">SHOW RECEIVE QR</button>
                 <div id="qr-receive-section" style="display:none; text-align:center; margin-top:15px;">
                     <img id="qr-receive-img" src="" width="140" style="border-radius:10px; box-shadow:0 0 15px var(--cyan);">
@@ -289,7 +297,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
         
-        <!-- COLUMN 4: Session History (NEW) -->
+        <!-- COLUMN 4: Session History -->
         <div class="box box-green" style="display:flex; flex-direction:column;">
             <h2 style="color:var(--green)">📜 HISTORY LOG</h2>
             <div id="history-list" style="flex-grow:1; overflow-y:auto; padding-right:5px; height: 450px;">
@@ -301,21 +309,24 @@ HTML_TEMPLATE = """
 
     <script>
         const socket = io();
-
-        socket.on('update_pin', (data) => {
-            document.getElementById('laptop-pin').innerText = data.pin;
-        });
+        let lastAction = '';
+        let lastPin = '';
 
         socket.on('clear_files', () => {
             document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">No files received yet...</p>';
-            // Also clear history on reset
             document.getElementById('history-list').innerHTML = '<p style="color:#555; font-style:italic;" id="empty-history">No history yet...</p>';
             document.getElementById('qr-receive-section').style.display = 'none';
             document.getElementById('qr-share-section').style.display = 'none';
+            document.getElementById('laptop-pin').innerText = '****';
+            lastAction = '';
+            lastPin = '';
         });
 
         function showQR(action) {
             fetch('/api/qr/' + action).then(r=>r.json()).then(data => {
+                // PIN sirf tab show hoga jab QR Generate hoga
+                document.getElementById('laptop-pin').innerText = data.pin;
+                
                 let actionName = action === 'receive' ? '📥 RECEIVE FILE' : '📤 SEND FILE';
                 let color = action === 'receive' ? 'var(--cyan)' : 'var(--orange)';
                 
@@ -329,21 +340,25 @@ HTML_TEMPLATE = """
                     document.getElementById('qr-receive-section').style.display = 'none';
                 }
 
-                // Append to History Log
-                let time = new Date().toLocaleTimeString();
-                let historyList = document.getElementById('history-list');
-                let emptyMsg = document.getElementById('empty-history');
-                if(emptyMsg) emptyMsg.style.display = 'none';
+                // History Tab mein duplicate entries ko roke
+                if (lastAction !== action || lastPin !== data.pin) {
+                    lastAction = action;
+                    lastPin = data.pin;
+                    
+                    let time = new Date().toLocaleTimeString();
+                    let historyList = document.getElementById('history-list');
+                    let emptyMsg = document.getElementById('empty-history');
+                    if(emptyMsg) emptyMsg.style.display = 'none';
 
-                let itemHtml = `
-                <div class="file-list-item" style="border-left-color:${color}; flex-direction:column; align-items:flex-start; gap:5px;">
-                    <div style="font-size:0.8rem; color:#aaa;">🕒 ${time}</div>
-                    <div style="font-weight:bold; color:${color};">${actionName}</div>
-                    <div style="font-size:1.5rem; font-weight:800; letter-spacing:4px; color:#fff; text-shadow:0 0 10px rgba(255,255,255,0.3);">${data.pin}</div>
-                </div>`;
-                
-                // Add newest on top
-                historyList.innerHTML = itemHtml + historyList.innerHTML;
+                    let itemHtml = `
+                    <div class="file-list-item" style="border-left-color:${color}; flex-direction:column; align-items:flex-start; gap:5px;">
+                        <div style="font-size:0.8rem; color:#aaa;">🕒 ${time}</div>
+                        <div style="font-weight:bold; color:${color};">${actionName}</div>
+                        <div style="font-size:1.5rem; font-weight:800; letter-spacing:4px; color:#fff; text-shadow:0 0 10px rgba(255,255,255,0.3);">${data.pin}</div>
+                    </div>`;
+                    
+                    historyList.innerHTML = itemHtml + historyList.innerHTML;
+                }
             });
         }
 
@@ -379,6 +394,7 @@ HTML_TEMPLATE = """
                 progressText.innerText = "0%";
                 progressContainer.style.background = `conic-gradient(var(--orange) 0%, #222 0%)`;
                 btn.style.display = 'block';
+                // Upload complete hote hi Backend naya PIN banayega, aur yahan wo QR call hoke History update hogi
                 showQR('share'); 
             };
             xhr.send(fd);
