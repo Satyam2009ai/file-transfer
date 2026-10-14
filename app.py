@@ -6,25 +6,27 @@ import uuid
 import zipfile
 import threading
 import random
-import re
 import traceback
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
 from flask_socketio import SocketIO, emit
 import qrcode
-from PIL import Image
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'neon-ultimate-colorful'
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SECRET_KEY'] = 'neon-ultimate-vault-v2'
+# Allow cross origin and use standard polling/websocket
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 app.config['MAX_CONTENT_LENGTH'] = 1000 * 1024 * 1024  # 1GB Max
 
 # --- Server Folders Setup ---
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'vault_uploads')
+TEMP_FOLDER = os.path.join(BASE_DIR, 'vault_temp')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-# --- COMPLETELY SEPARATED VARIABLES ---
+# --- SESSION & PIN VARIABLES ---
 SESSION_TOKEN = str(uuid.uuid4().hex)[:10]
 
 # RECEIVE VARIABLES (Phone -> Laptop)
@@ -34,15 +36,6 @@ FILES_FOR_LAPTOP = {}
 # SEND VARIABLES (Laptop -> Phone)
 SEND_PIN = ""
 FILES_FOR_PHONE = {}
-
-def clear_physical_files():
-    for filename in os.listdir(UPLOAD_FOLDER):
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        try:
-            if os.path.isfile(filepath):
-                os.remove(filepath)
-        except:
-            pass
 
 # ================= BACKGROUND THREAD (SELF-DESTRUCT) =================
 def auto_destruct_worker():
@@ -58,7 +51,8 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_LAPTOP:
                     del FILES_FOR_LAPTOP[filepath]
-                socketio.emit('refresh_downloads')
+                # Update frontend
+                socketio.emit('file_destructed', {'filename': os.path.basename(filepath)})
                 
         # 2. Clean PHONE DOWNLOAD Files
         for filepath, timestamp in list(FILES_FOR_PHONE.items()):
@@ -68,13 +62,16 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_PHONE:
                     del FILES_FOR_PHONE[filepath]
+                # Update frontend
                 socketio.emit('refresh_downloads')
 
 threading.Thread(target=auto_destruct_worker, daemon=True).start()
 
-def make_safe_filename(filename):
-    safe = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', filename)
-    return safe if safe else f"file_{int(time.time())}"
+def get_safe_filename(filename):
+    safe = secure_filename(filename)
+    if not safe:
+        safe = f"file_{int(time.time())}.dat"
+    return safe
 
 @app.after_request
 def add_header(response):
@@ -143,9 +140,11 @@ def get_file(filename):
 
 @app.route('/api/upload', methods=['POST'])
 def handle_upload():
+    # PHONE -> LAPTOP (Receive)
     try:
         files = request.files.getlist('files')
-        if not files: return jsonify({'error': 'No files', 'msg': 'No files provided'}), 400
+        if not files or files[0].filename == '': 
+            return jsonify({'error': 'No files', 'msg': 'No files provided'}), 400
 
         if len(files) > 1:
             zip_filename = f"Vault_Archive_{int(time.time())}.zip"
@@ -153,9 +152,9 @@ def handle_upload():
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file in files:
                     if file.filename:
-                        safe_name = make_safe_filename(file.filename)
-                        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{safe_name}")
-                        file.save(temp_path) # Safe RAM memory save
+                        safe_name = get_safe_filename(file.filename)
+                        temp_path = os.path.join(TEMP_FOLDER, safe_name)
+                        file.save(temp_path)
                         zipf.write(temp_path, arcname=safe_name)
                         os.remove(temp_path)
             FILES_FOR_LAPTOP[zip_path] = time.time()
@@ -163,7 +162,7 @@ def handle_upload():
         else:
             file = files[0]
             if file.filename:
-                safe_filename = make_safe_filename(file.filename)
+                safe_filename = get_safe_filename(file.filename)
                 final_path = os.path.join(UPLOAD_FOLDER, safe_filename)
                 file.save(final_path)
                 FILES_FOR_LAPTOP[final_path] = time.time()
@@ -171,15 +170,15 @@ def handle_upload():
 
         return jsonify({'status': 'success'})
     except Exception as e:
-        print(traceback.format_exc())
+        print("Upload Error:", traceback.format_exc())
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
 @app.route('/api/share_to_phone', methods=['POST'])
 def share_to_phone():
+    # LAPTOP -> PHONE (Send)
     try:
         global SEND_PIN
         
-        # 1. Clean previous files
         for filepath in list(FILES_FOR_PHONE.keys()):
             if os.path.exists(filepath):
                 try: os.remove(filepath)
@@ -187,42 +186,40 @@ def share_to_phone():
         FILES_FOR_PHONE.clear()
         
         files = request.files.getlist('files')
-        if not files:
+        if not files or files[0].filename == '':
             return jsonify({'status': 'error', 'msg': 'No files found'}), 400
 
-        # 2. Memory Safe Upload & Zip Processing
         if len(files) > 1:
             zip_filename = f"Vault_Archive_{int(time.time())}.zip"
             zip_path = os.path.join(UPLOAD_FOLDER, zip_filename)
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for file in files:
                     if file.filename:
-                        safe_name = make_safe_filename(file.filename)
-                        temp_path = os.path.join(UPLOAD_FOLDER, f"temp_{safe_name}")
-                        file.save(temp_path)  # Ram Safe!
+                        safe_name = get_safe_filename(file.filename)
+                        temp_path = os.path.join(TEMP_FOLDER, safe_name)
+                        file.save(temp_path)
                         zipf.write(temp_path, arcname=safe_name)
                         os.remove(temp_path)
             FILES_FOR_PHONE[zip_path] = time.time()
         else:
             file = files[0]
             if file.filename:
-                safe_filename = make_safe_filename(file.filename)
+                safe_filename = get_safe_filename(file.filename)
                 save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
                 file.save(save_path)
                 FILES_FOR_PHONE[save_path] = time.time()
                 
-        # 3. Success -> New PIN Generate
+        # Generate new PIN and QR
         SEND_PIN = str(random.randint(1000, 9999))
-        
         host_url = request.host_url.rstrip('/')
         url = f"{host_url}/auth?token={SESSION_TOKEN}&action=share"
         qr_b64 = generate_qr_base64(url, 'share')
         
-        socketio.emit('refresh_downloads', broadcast=True)
+        socketio.emit('refresh_downloads')
         return jsonify({'status': 'success', 'pin': SEND_PIN, 'qr': qr_b64})
     
     except Exception as e:
-        print(traceback.format_exc())
+        print("Share Error:", traceback.format_exc())
         return jsonify({'status': 'error', 'msg': str(e)}), 500
 
 @app.route('/api/list_shared')
@@ -233,7 +230,7 @@ def list_shared():
 @socketio.on('connect')
 def handle_connect():
     ua = request.headers.get('User-Agent', 'Unknown Device')
-    CONNECTED_DEVICES[request.sid] = "📱 Mobile Node" if "Mobile" in ua else "💻 Command Node"
+    CONNECTED_DEVICES[request.sid] = "📱 Mobile" if "Mobile" in ua else "💻 Laptop"
     emit('update_radar', {'devices': list(CONNECTED_DEVICES.values())}, broadcast=True)
 
 @socketio.on('disconnect')
