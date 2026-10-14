@@ -22,11 +22,41 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'vault_uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-SESSION_TOKEN = str(uuid.uuid4().hex)[:10] 
-SECURITY_PIN = str(random.randint(1000, 9999)) 
-
+# Global Variables (Ab ye dynamic honge)
+SESSION_TOKEN = ""
+SECURITY_PIN = ""
 CONNECTED_DEVICES = {} 
 SHARED_FILES_DB = {}   
+
+# --- CORE RESET FUNCTION ---
+def reset_system_state():
+    """Ye function purana data clear karega aur naya PIN/Token banayega"""
+    global SESSION_TOKEN, SECURITY_PIN, SHARED_FILES_DB
+    
+    SESSION_TOKEN = str(uuid.uuid4().hex)[:10]
+    SECURITY_PIN = str(random.randint(1000, 9999))
+    
+    # 1. Clear database memory
+    SHARED_FILES_DB.clear()
+    
+    # 2. Delete old physical files from the folder
+    for filename in os.listdir(UPLOAD_FOLDER):
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        try:
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+        except Exception as e:
+            pass
+            
+    # 3. Tell frontend to clear old files from screen
+    socketio.emit('clear_files')
+    # 4. Tell frontend to update PIN dynamically
+    socketio.emit('update_pin', {'pin': SECURITY_PIN})
+    
+    return SECURITY_PIN, SESSION_TOKEN
+
+# Initialize system on startup
+reset_system_state()
 
 # ================= BACKGROUND THREAD (SELF-DESTRUCT) =================
 def auto_destruct_worker():
@@ -34,14 +64,15 @@ def auto_destruct_worker():
         time.sleep(5)
         current_time = time.time()
         expired = []
-        for filepath, timestamp in SHARED_FILES_DB.items():
+        for filepath, timestamp in list(SHARED_FILES_DB.items()):
             if current_time - timestamp > 60:  # 60 seconds auto-delete
                 if os.path.exists(filepath):
                     os.remove(filepath)
                 expired.append(filepath)
                 
         for path in expired:
-            del SHARED_FILES_DB[path]
+            if path in SHARED_FILES_DB:
+                del SHARED_FILES_DB[path]
             filename = os.path.basename(path)
             socketio.emit('file_destructed', {'filename': filename})
             socketio.emit('refresh_downloads', broadcast=True)
@@ -69,7 +100,9 @@ def generate_qr_base64(url, action):
 # ================= ROUTES =================
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE, mode='laptop', pin=SECURITY_PIN, token=SESSION_TOKEN)
+    # Jab website refresh hogi, sab kuch naya ban jayega
+    pin, token = reset_system_state()
+    return render_template_string(HTML_TEMPLATE, mode='laptop', pin=pin, token=token)
 
 @app.route('/auth')
 def phone_view():
@@ -77,7 +110,7 @@ def phone_view():
     action = request.args.get('action') 
     if token == SESSION_TOKEN:
         return render_template_string(HTML_TEMPLATE, mode='phone_auth', phone_action=action)
-    return "<h1>403 FORBIDDEN - INVALID SECURITY TOKEN</h1>", 403
+    return "<h1>403 FORBIDDEN - INVALID SECURITY TOKEN (PLEASE SCAN LATEST QR)</h1>", 403
 
 @app.route('/api/verify_pin', methods=['POST'])
 def verify_pin():
@@ -87,10 +120,12 @@ def verify_pin():
 
 @app.route('/api/qr/<action>')
 def get_qr(action):
-    # Auto-detect website URL
+    # Naya QR generate karne par, PIN, Token aur Files reset ho jayengi!
+    pin, token = reset_system_state()
+    
     host_url = request.host_url.rstrip('/')
-    url = f"{host_url}/auth?token={SESSION_TOKEN}&action={action}"
-    return jsonify({'url': url, 'qr': generate_qr_base64(url, action)})
+    url = f"{host_url}/auth?token={token}&action={action}"
+    return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': pin})
 
 @app.route('/get_file/<path:filename>')
 def get_file(filename):
@@ -161,7 +196,7 @@ HTML_TEMPLATE = """
         :root { --bg: #090914; --cyan: #00f3ff; --pink: #ff007f; --green: #00ff66; --orange: #ff6600; --purple: #9d00ff; --text: #ffffff; }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
         body { background-color: var(--bg); color: var(--text); padding: 15px; display: flex; justify-content: center; }
-        .box { background: linear-gradient(145deg, rgba(20,20,35,0.95), rgba(10,10,20,0.95)); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+        .box { background: linear-gradient(145deg, rgba(20,20,35,0.95), rgba(10,10,20,0.95)); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 8px 32px rgba(0,0,0,0.5); position: relative;}
         .box-cyan { border-top: 3px solid var(--cyan); box-shadow: 0 -5px 20px rgba(0,243,255,0.15); }
         .box-pink { border-top: 3px solid var(--pink); box-shadow: 0 -5px 20px rgba(255,0,127,0.15); }
         .box-orange { border-top: 3px solid var(--orange); box-shadow: 0 -5px 20px rgba(255,102,0,0.15); }
@@ -172,10 +207,10 @@ HTML_TEMPLATE = """
         .btn { background: linear-gradient(45deg, var(--purple), var(--pink)); color: var(--text); padding: 12px; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; width: 100%; text-transform: uppercase; font-weight: bold;}
         .btn:hover { filter: brightness(1.2); transform: scale(1.02); }
         
-        /* New Button Styles */
         .btn-action { color: #000; border: none; padding: 6px 12px; border-radius: 5px; font-weight: bold; cursor: pointer; text-decoration: none; font-size: 0.8rem; text-align: center; display: inline-block; transition: 0.2s;}
         .btn-view { background: var(--cyan); box-shadow: 0 0 10px var(--cyan); }
         .btn-down { background: var(--green); box-shadow: 0 0 10px var(--green); }
+        .btn-refresh { background: var(--purple); color: white; padding: 5px 10px; font-size: 0.7rem; position: absolute; right: 15px; top: 15px;}
         .btn-action:hover { background: #fff; box-shadow: 0 0 15px #fff; transform: scale(1.05); }
 
         .phone-container { width: 100%; max-width: 400px; margin: 20px auto; }
@@ -185,11 +220,9 @@ HTML_TEMPLATE = """
         .swipe-text { position: absolute; width: 100%; line-height: 60px; color: #fff; font-weight: bold; z-index: 1; pointer-events: none; text-align: center; }
         .file-list-item { padding: 12px; background: rgba(0,0,0,0.5); border-radius: 8px; margin-bottom: 10px; border-left: 4px solid var(--cyan); transition: 0.3s; display: flex; justify-content: space-between; align-items: center;}
         
-        /* Circular Progress */
         .progress-circle { width: 120px; height: 120px; border-radius: 50%; background: conic-gradient(var(--cyan) 0%, #222 0%); display: flex; align-items: center; justify-content: center; margin: 20px auto; display: none; box-shadow: 0 0 15px rgba(0, 243, 255, 0.4); }
         .progress-circle-inner { width: 100px; height: 100px; border-radius: 50%; background: var(--bg); display: flex; align-items: center; justify-content: center; font-size: 1.8rem; font-weight: bold; color: var(--cyan); text-shadow: 0 0 10px var(--cyan); }
         
-        /* Popup Modal */
         .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
         .modal-content { background: #111; padding: 40px; border-radius: 20px; border: 2px solid var(--cyan); text-align: center; box-shadow: 0 0 30px var(--cyan); animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
         .modal-btn { background: var(--cyan); color: #000; padding: 10px 25px; border: none; border-radius: 5px; font-weight: bold; margin-top: 20px; cursor: pointer; font-size: 1.1rem; text-transform: uppercase; box-shadow: 0 0 15px var(--cyan); }
@@ -214,8 +247,9 @@ HTML_TEMPLATE = """
     <div class="grid-container">
         <div style="display:flex; flex-direction:column; gap:20px;">
             <div class="box box-cyan">
+                <button class="btn-action btn-refresh" onclick="window.location.reload()">🔄 RESET</button>
                 <h2 style="color:var(--cyan)">📥 RECEIVE FROM PHONE</h2>
-                <div class="pin-display">{{ pin }}</div>
+                <div class="pin-display" id="laptop-pin">{{ pin }}</div>
                 <button class="btn" onclick="showQR('receive')" style="background:var(--cyan); color:#000;">SHOW RECEIVE QR</button>
                 <div id="qr-receive-section" style="display:none; text-align:center; margin-top:15px;">
                     <img id="qr-receive-img" src="" width="140" style="border-radius:10px; box-shadow:0 0 15px var(--cyan);">
@@ -235,7 +269,6 @@ HTML_TEMPLATE = """
                 <input type="file" id="share-input" multiple style="display:none;" onchange="uploadToPhone()">
                 <button class="btn" id="choose-file-btn" onclick="document.getElementById('share-input').click()" style="background: linear-gradient(45deg, var(--orange), var(--pink));">📁 CHOOSE FILE</button>
                 
-                <!-- Circular Progress for Laptop Sending -->
                 <div id="laptop-progress" class="progress-circle">
                     <div class="progress-circle-inner" id="laptop-progress-text">0%</div>
                 </div>
@@ -257,14 +290,30 @@ HTML_TEMPLATE = """
     <script>
         const socket = io();
 
+        // Dynamically update PIN when server resets it
+        socket.on('update_pin', (data) => {
+            document.getElementById('laptop-pin').innerText = data.pin;
+        });
+
+        // Clear files from UI when server resets
+        socket.on('clear_files', () => {
+            document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">No files received yet...</p>';
+            // Also hide old QRs
+            document.getElementById('qr-receive-section').style.display = 'none';
+            document.getElementById('qr-share-section').style.display = 'none';
+        });
+
         function showQR(action) {
             fetch('/api/qr/' + action).then(r=>r.json()).then(data => {
+                // Backend creates new PIN, frontend updates it via socket, but we can set it here too
                 if (action === 'receive') {
                     document.getElementById('qr-receive-img').src = data.qr;
                     document.getElementById('qr-receive-section').style.display = 'block';
+                    document.getElementById('qr-share-section').style.display = 'none';
                 } else {
                     document.getElementById('qr-share-img').src = data.qr;
                     document.getElementById('qr-share-section').style.display = 'block';
+                    document.getElementById('qr-receive-section').style.display = 'none';
                 }
             });
         }
@@ -363,7 +412,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- Dynamic Circular Progress UI -->
                 <div id="progress-container" class="progress-circle">
                     <div class="progress-circle-inner" id="progress-text">0%</div>
                 </div>
@@ -397,7 +445,7 @@ HTML_TEMPLATE = """
                     document.getElementById('step-1').style.display = 'none';
                     document.getElementById('step-2').style.display = 'block';
                     if(actionType === 'share') fetchSharedFiles(); 
-                } else alert("INVALID PIN.");
+                } else alert("INVALID PIN OR SESSION EXPIRED. PLEASE SCAN LATEST QR.");
             });
         }
 
@@ -441,7 +489,6 @@ HTML_TEMPLATE = """
                 let xhr = new XMLHttpRequest();
                 xhr.open('POST', '/api/upload', true);
                 
-                // Track Progress Dynamically
                 xhr.upload.onprogress = function(e) {
                     if (e.lengthComputable) {
                         let percent = Math.round((e.loaded / e.total) * 100);
@@ -451,10 +498,8 @@ HTML_TEMPLATE = """
                 };
 
                 xhr.onload = () => {
-                    // Show Popup!
                     document.getElementById('success-modal').style.display = 'flex';
                     
-                    // Reset UI behind the popup
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('progress-text').innerText = "0%";
                     document.getElementById('progress-container').style.background = `conic-gradient(var(--cyan) 0%, #222 0%)`;
