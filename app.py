@@ -58,7 +58,7 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_LAPTOP:
                     del FILES_FOR_LAPTOP[filepath]
-                socketio.emit('file_destructed', {'filename': os.path.basename(filepath)})
+                socketio.emit('refresh_downloads')
                 
         # 2. Clean PHONE DOWNLOAD Files
         for filepath, timestamp in list(FILES_FOR_PHONE.items()):
@@ -68,7 +68,7 @@ def auto_destruct_worker():
                     except: pass
                 if filepath in FILES_FOR_PHONE:
                     del FILES_FOR_PHONE[filepath]
-                socketio.emit('refresh_downloads', broadcast=True)
+                socketio.emit('refresh_downloads')
 
 threading.Thread(target=auto_destruct_worker, daemon=True).start()
 
