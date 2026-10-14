@@ -22,7 +22,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'vault_uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Global Variables (Ab ye dynamic honge)
+# Global Variables
 SESSION_TOKEN = ""
 SECURITY_PIN = ""
 CONNECTED_DEVICES = {} 
@@ -48,7 +48,7 @@ def reset_system_state():
         except Exception as e:
             pass
             
-    # 3. Tell frontend to clear old files from screen
+    # 3. Tell frontend to clear old files & history from screen
     socketio.emit('clear_files')
     # 4. Tell frontend to update PIN dynamically
     socketio.emit('update_pin', {'pin': SECURITY_PIN})
@@ -100,7 +100,6 @@ def generate_qr_base64(url, action):
 # ================= ROUTES =================
 @app.route('/')
 def index():
-    # Jab website refresh hogi, sab kuch naya ban jayega
     pin, token = reset_system_state()
     return render_template_string(HTML_TEMPLATE, mode='laptop', pin=pin, token=token)
 
@@ -120,9 +119,7 @@ def verify_pin():
 
 @app.route('/api/qr/<action>')
 def get_qr(action):
-    # Naya QR generate karne par, PIN, Token aur Files reset ho jayengi!
     pin, token = reset_system_state()
-    
     host_url = request.host_url.rstrip('/')
     url = f"{host_url}/auth?token={token}&action={action}"
     return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': pin})
@@ -201,7 +198,9 @@ HTML_TEMPLATE = """
         .box-pink { border-top: 3px solid var(--pink); box-shadow: 0 -5px 20px rgba(255,0,127,0.15); }
         .box-orange { border-top: 3px solid var(--orange); box-shadow: 0 -5px 20px rgba(255,102,0,0.15); }
         .box-purple { border-top: 3px solid var(--purple); box-shadow: 0 -5px 20px rgba(157,0,255,0.15); }
-        .grid-container { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; max-width: 1300px; width: 100%; }
+        .box-green { border-top: 3px solid var(--green); box-shadow: 0 -5px 20px rgba(0,255,102,0.15); } /* New Green Box for History */
+        
+        .grid-container { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 20px; max-width: 1500px; width: 100%; }
         h2 { margin-bottom: 15px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 10px currentColor;}
         .pin-display { font-size: 2.8rem; letter-spacing: 12px; text-align: center; font-weight: 800; color: var(--cyan); text-shadow: 0 0 15px var(--cyan); margin: 5px 0;}
         .btn { background: linear-gradient(45deg, var(--purple), var(--pink)); color: var(--text); padding: 12px; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; width: 100%; text-transform: uppercase; font-weight: bold;}
@@ -229,11 +228,11 @@ HTML_TEMPLATE = """
         .modal-btn:hover { background: #fff; box-shadow: 0 0 25px #fff; }
         @keyframes popIn { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 
+        @media (max-width: 1200px) { .grid-container { grid-template-columns: 1fr 1fr; } }
         @media (max-width: 800px) { .grid-container { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
-    <!-- Global Success Popup -->
     <div class="modal-overlay" id="success-modal">
         <div class="modal-content">
             <h1 style="font-size: 4rem; margin-bottom: 10px;">🚀</h1>
@@ -245,6 +244,8 @@ HTML_TEMPLATE = """
 
     {% if mode == 'laptop' %}
     <div class="grid-container">
+        
+        <!-- COLUMN 1: Receive & Radar -->
         <div style="display:flex; flex-direction:column; gap:20px;">
             <div class="box box-cyan">
                 <button class="btn-action btn-refresh" onclick="window.location.reload()">🔄 RESET</button>
@@ -263,6 +264,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- COLUMN 2: Send -->
         <div style="display:flex; flex-direction:column; gap:20px;">
             <div class="box box-orange">
                 <h2 style="color:var(--orange)">📤 SEND TO PHONE</h2>
@@ -279,33 +281,44 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- COLUMN 3: Cloud Files -->
         <div class="box box-pink">
             <h2 style="color:var(--pink)">📥 CLOUD FILES</h2>
             <div id="file-list" style="height:450px; overflow-y:auto; padding-right:5px;">
                 <p style="color:#555; font-style:italic;">No files received yet...</p>
             </div>
         </div>
+        
+        <!-- COLUMN 4: Session History (NEW) -->
+        <div class="box box-green" style="display:flex; flex-direction:column;">
+            <h2 style="color:var(--green)">📜 HISTORY LOG</h2>
+            <div id="history-list" style="flex-grow:1; overflow-y:auto; padding-right:5px; height: 450px;">
+                <p style="color:#555; font-style:italic;" id="empty-history">No history yet...</p>
+            </div>
+        </div>
+        
     </div>
 
     <script>
         const socket = io();
 
-        // Dynamically update PIN when server resets it
         socket.on('update_pin', (data) => {
             document.getElementById('laptop-pin').innerText = data.pin;
         });
 
-        // Clear files from UI when server resets
         socket.on('clear_files', () => {
             document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">No files received yet...</p>';
-            // Also hide old QRs
+            // Also clear history on reset
+            document.getElementById('history-list').innerHTML = '<p style="color:#555; font-style:italic;" id="empty-history">No history yet...</p>';
             document.getElementById('qr-receive-section').style.display = 'none';
             document.getElementById('qr-share-section').style.display = 'none';
         });
 
         function showQR(action) {
             fetch('/api/qr/' + action).then(r=>r.json()).then(data => {
-                // Backend creates new PIN, frontend updates it via socket, but we can set it here too
+                let actionName = action === 'receive' ? '📥 RECEIVE FILE' : '📤 SEND FILE';
+                let color = action === 'receive' ? 'var(--cyan)' : 'var(--orange)';
+                
                 if (action === 'receive') {
                     document.getElementById('qr-receive-img').src = data.qr;
                     document.getElementById('qr-receive-section').style.display = 'block';
@@ -315,6 +328,22 @@ HTML_TEMPLATE = """
                     document.getElementById('qr-share-section').style.display = 'block';
                     document.getElementById('qr-receive-section').style.display = 'none';
                 }
+
+                // Append to History Log
+                let time = new Date().toLocaleTimeString();
+                let historyList = document.getElementById('history-list');
+                let emptyMsg = document.getElementById('empty-history');
+                if(emptyMsg) emptyMsg.style.display = 'none';
+
+                let itemHtml = `
+                <div class="file-list-item" style="border-left-color:${color}; flex-direction:column; align-items:flex-start; gap:5px;">
+                    <div style="font-size:0.8rem; color:#aaa;">🕒 ${time}</div>
+                    <div style="font-weight:bold; color:${color};">${actionName}</div>
+                    <div style="font-size:1.5rem; font-weight:800; letter-spacing:4px; color:#fff; text-shadow:0 0 10px rgba(255,255,255,0.3);">${data.pin}</div>
+                </div>`;
+                
+                // Add newest on top
+                historyList.innerHTML = itemHtml + historyList.innerHTML;
             });
         }
 
