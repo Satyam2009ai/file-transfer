@@ -22,55 +22,46 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'vault_uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Global Variables
-SESSION_TOKEN = ""
-SECURITY_PIN = ""
-CONNECTED_DEVICES = {} 
-SHARED_FILES_DB = {}   
+# --- COMPLETELY SEPARATED VARIABLES ---
+SESSION_TOKEN = str(uuid.uuid4().hex)[:10]
 
-# --- AUTH & RESET FUNCTIONS ---
-def generate_new_auth():
-    """Naya PIN aur Token banata hai jab nayi file attach hoti hai"""
-    global SESSION_TOKEN, SECURITY_PIN
-    SESSION_TOKEN = str(uuid.uuid4().hex)[:10]
-    SECURITY_PIN = str(random.randint(1000, 9999))
-    socketio.emit('update_pin', {'pin': SECURITY_PIN})
-    return SECURITY_PIN, SESSION_TOKEN
+# RECEIVE VARIABLES (Phone -> Laptop)
+RECEIVE_PIN = ""
+FILES_FOR_LAPTOP = {}
 
-def reset_system_state():
-    """Purana data clear karega aur naya PIN/Token banayega"""
-    generate_new_auth()
-    SHARED_FILES_DB.clear()
+# SEND VARIABLES (Laptop -> Phone)
+SEND_PIN = ""
+FILES_FOR_PHONE = {}
+
+def clear_physical_files():
+    """Sirf folders se files delete karta hai bina system crash kiye"""
     for filename in os.listdir(UPLOAD_FOLDER):
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         try:
             if os.path.isfile(filepath):
                 os.remove(filepath)
-        except Exception as e:
+        except:
             pass
-    socketio.emit('clear_files')
-    return SECURITY_PIN, SESSION_TOKEN
-
-reset_system_state()
 
 # ================= BACKGROUND THREAD (SELF-DESTRUCT) =================
 def auto_destruct_worker():
     while True:
         time.sleep(5)
         current_time = time.time()
-        expired = []
-        for filepath, timestamp in list(SHARED_FILES_DB.items()):
+        
+        # 1. Clean LAPTOP RECEIVE Files
+        for filepath, timestamp in list(FILES_FOR_LAPTOP.items()):
             if current_time - timestamp > 60:  # 60 seconds auto-delete
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                expired.append(filepath)
+                if os.path.exists(filepath): os.remove(filepath)
+                del FILES_FOR_LAPTOP[filepath]
+                socketio.emit('file_destructed', {'filename': os.path.basename(filepath)})
                 
-        for path in expired:
-            if path in SHARED_FILES_DB:
-                del SHARED_FILES_DB[path]
-            filename = os.path.basename(path)
-            socketio.emit('file_destructed', {'filename': filename})
-            socketio.emit('refresh_downloads', broadcast=True)
+        # 2. Clean PHONE DOWNLOAD Files
+        for filepath, timestamp in list(FILES_FOR_PHONE.items()):
+            if current_time - timestamp > 60:  # 60 seconds auto-delete
+                if os.path.exists(filepath): os.remove(filepath)
+                del FILES_FOR_PHONE[filepath]
+                socketio.emit('refresh_downloads', broadcast=True)
 
 threading.Thread(target=auto_destruct_worker, daemon=True).start()
 
@@ -95,9 +86,7 @@ def generate_qr_base64(url, action):
 # ================= ROUTES =================
 @app.route('/')
 def index():
-    # Page refresh hone par ek baar reset hoga
-    reset_system_state()
-    return render_template_string(HTML_TEMPLATE, mode='laptop', pin=SECURITY_PIN)
+    return render_template_string(HTML_TEMPLATE, mode='laptop')
 
 @app.route('/auth')
 def phone_view():
@@ -109,15 +98,38 @@ def phone_view():
 
 @app.route('/api/verify_pin', methods=['POST'])
 def verify_pin():
-    if request.json.get('pin') == SECURITY_PIN:
+    data = request.json
+    action = data.get('action')
+    pin = data.get('pin')
+    
+    # Strictly Check Separate PINs
+    if action == 'receive' and pin == RECEIVE_PIN:
         return jsonify({'status': 'success'})
+    elif action == 'share' and pin == SEND_PIN:
+        return jsonify({'status': 'success'})
+        
     return jsonify({'status': 'error'})
 
 @app.route('/api/qr/<action>')
 def get_qr(action):
+    global RECEIVE_PIN, SEND_PIN
+    reset = request.args.get('reset')
+    
+    # Jab UI reset call karega tabhi naya PIN aur fresh data banega
+    if reset == '1':
+        if action == 'receive':
+            RECEIVE_PIN = str(random.randint(1000, 9999))
+            FILES_FOR_LAPTOP.clear()
+            socketio.emit('clear_files')
+        elif action == 'share':
+            SEND_PIN = str(random.randint(1000, 9999))
+            FILES_FOR_PHONE.clear()
+            
+    current_pin = RECEIVE_PIN if action == 'receive' else SEND_PIN
     host_url = request.host_url.rstrip('/')
     url = f"{host_url}/auth?token={SESSION_TOKEN}&action={action}"
-    return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': SECURITY_PIN})
+    
+    return jsonify({'url': url, 'qr': generate_qr_base64(url, action), 'pin': current_pin})
 
 @app.route('/get_file/<path:filename>')
 def get_file(filename):
@@ -125,6 +137,7 @@ def get_file(filename):
 
 @app.route('/api/upload', methods=['POST'])
 def handle_upload():
+    # PHONE -> LAPTOP (Receive Flow)
     files = request.files.getlist('files')
     if not files: return jsonify({'error': 'No files'}), 400
 
@@ -135,36 +148,49 @@ def handle_upload():
             for file in files:
                 safe_name = make_safe_filename(file.filename)
                 zipf.writestr(safe_name, file.read())
-        SHARED_FILES_DB[zip_path] = time.time()
-        socketio.emit('file_completed', {'filename': zip_filename, 'info': 'Zipped Batch'})
+        FILES_FOR_LAPTOP[zip_path] = time.time()
+        socketio.emit('file_completed', {'filename': zip_filename})
     else:
         file = files[0]
         safe_filename = make_safe_filename(file.filename)
         final_path = os.path.join(UPLOAD_FOLDER, safe_filename)
         file.save(final_path)
-        SHARED_FILES_DB[final_path] = time.time()
-        socketio.emit('file_completed', {'filename': safe_filename, 'info': 'Cloud Hosted'})
+        FILES_FOR_LAPTOP[final_path] = time.time()
+        socketio.emit('file_completed', {'filename': safe_filename})
 
     return jsonify({'status': 'success'})
 
 @app.route('/api/share_to_phone', methods=['POST'])
 def share_to_phone():
+    # LAPTOP -> PHONE (Send Flow)
+    global SEND_PIN
+    
+    # 1. Nayi file upload karne par Purana File aur Purana PIN completely clear
+    FILES_FOR_PHONE.clear()
+    
     files = request.files.getlist('files')
     for file in files:
         if file.filename:
             safe_filename = make_safe_filename(file.filename)
             save_path = os.path.join(UPLOAD_FOLDER, safe_filename)
             file.save(save_path)
-            SHARED_FILES_DB[save_path] = time.time()
+            FILES_FOR_PHONE[save_path] = time.time()
             
-    # File upload hote hi Naya PIN aur Token ban jayega (User requirement)
-    generate_new_auth()
+    # 2. Upload successful hone par strictly Naya PIN Generate
+    SEND_PIN = str(random.randint(1000, 9999))
+    
+    # 3. Naya QR and PIN sath mein Frontend ko return bhejna (bina reload ke)
+    host_url = request.host_url.rstrip('/')
+    url = f"{host_url}/auth?token={SESSION_TOKEN}&action=share"
+    qr_b64 = generate_qr_base64(url, 'share')
+    
     socketio.emit('refresh_downloads', broadcast=True)
-    return jsonify({'status': 'success'})
+    return jsonify({'status': 'success', 'pin': SEND_PIN, 'qr': qr_b64})
 
 @app.route('/api/list_shared')
 def list_shared():
-    files = [os.path.basename(f) for f in SHARED_FILES_DB.keys() if os.path.exists(f)]
+    # Sirf phone ki files jayengi
+    files = [os.path.basename(f) for f in FILES_FOR_PHONE.keys() if os.path.exists(f)]
     return jsonify({'files': files})
 
 @socketio.on('connect')
@@ -200,7 +226,7 @@ HTML_TEMPLATE = """
         
         .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1000px; width: 100%; }
         h2 { margin-bottom: 15px; font-size: 1.2rem; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 10px currentColor;}
-        .pin-display { font-size: 3rem; letter-spacing: 15px; text-align: center; font-weight: 900; color: var(--text); text-shadow: 0 0 20px var(--cyan); margin: 15px 0;}
+        .pin-display { font-size: 3.5rem; letter-spacing: 15px; text-align: center; font-weight: 900; color: var(--text); text-shadow: 0 0 20px currentColor; margin: 15px 0;}
         
         .btn { background: linear-gradient(45deg, var(--purple), var(--pink)); color: var(--text); padding: 15px; border: none; border-radius: 8px; cursor: pointer; transition: 0.3s; width: 100%; text-transform: uppercase; font-weight: bold; font-size: 1.1rem;}
         .btn:hover { filter: brightness(1.2); transform: scale(1.02); }
@@ -227,11 +253,26 @@ HTML_TEMPLATE = """
         
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
         .blinking-text { animation: blink 1.5s infinite; color: var(--orange); text-align: center; margin-top: 15px; font-weight: bold; font-size: 1.2rem;}
+        
+        /* Popup */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: none; align-items: center; justify-content: center; backdrop-filter: blur(5px); }
+        .modal-content { background: #111; padding: 40px; border-radius: 20px; border: 2px solid var(--cyan); text-align: center; box-shadow: 0 0 30px var(--cyan); animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        @keyframes popIn { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 
         @media (max-width: 800px) { .grid-container { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
+
+    <!-- Global Success Popup -->
+    <div class="modal-overlay" id="success-modal">
+        <div class="modal-content">
+            <h1 style="font-size: 4rem; margin-bottom: 10px;">🚀</h1>
+            <h2 style="color: var(--cyan); margin-bottom: 10px;">Transfer Complete!</h2>
+            <p style="color: #aaa;">Your files are securely hosted.</p>
+            <button class="btn" style="margin-top:20px; background:var(--cyan); color:#000;" onclick="document.getElementById('success-modal').style.display='none'">Awesome</button>
+        </div>
+    </div>
 
     {% if mode == 'laptop' %}
     
@@ -253,12 +294,12 @@ HTML_TEMPLATE = """
         <div class="grid-container">
             <div class="box box-cyan">
                 <h2 style="color:var(--cyan); text-align:center;">SCAN TO SEND FILES TO LAPTOP</h2>
-                <div class="pin-display" id="laptop-pin">{{ pin }}</div>
+                <!-- Separate Receive PIN -->
+                <div class="pin-display" id="receive-pin" style="color:var(--cyan);">****</div>
                 
                 <div id="qr-receive-section" style="text-align:center; margin-top:15px;">
                     <img id="qr-receive-img" src="" width="180" style="border-radius:10px; box-shadow:0 0 20px var(--cyan);">
                     
-                    <!-- Download & Share Buttons -->
                     <div style="display:flex; gap:10px; justify-content:center; margin-top:15px;">
                         <button class="btn-action btn-down" onclick="downloadQR('qr-receive-img', 'Receive')">⬇️ SAVE</button>
                         <button class="btn-action btn-view" onclick="shareQR('qr-receive-img')">🔗 SHARE</button>
@@ -298,12 +339,15 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Share QR Section (Hidden until uploaded) -->
+            <!-- Share QR & PIN Section (Shows UP AFTER UPLOAD) -->
             <div id="qr-share-section" style="display:none; text-align:center; margin-top:30px;">
-                <h3 style="color:#fff; margin-bottom:10px;">File Ready! Scan to Download</h3>
-                <img id="qr-share-img" src="" width="200" style="border-radius:10px; box-shadow:0 0 20px var(--orange);">
+                <h3 style="color:#fff; margin-bottom:5px;">File Ready! Scan & Enter This PIN:</h3>
                 
-                <!-- Download & Share Buttons -->
+                <!-- This PIN appears exactly on the send screen without going back -->
+                <div class="pin-display" id="send-pin" style="color:var(--orange);">****</div>
+                
+                <img id="qr-share-img" src="" width="200" style="border-radius:10px; box-shadow:0 0 20px var(--orange); margin-top: 10px;">
+                
                 <div style="display:flex; gap:10px; justify-content:center; margin-top:20px;">
                     <button class="btn-action btn-down" style="padding:10px 20px;" onclick="downloadQR('qr-share-img', 'Share')">⬇️ SAVE QR</button>
                     <button class="btn-action btn-view" style="padding:10px 20px;" onclick="shareQR('qr-share-img')">🔗 SHARE QR</button>
@@ -315,14 +359,9 @@ HTML_TEMPLATE = """
     <script>
         const socket = io();
 
-        // Dynamically update PIN if server changes it (e.g. after upload)
-        socket.on('update_pin', (data) => {
-            document.getElementById('laptop-pin').innerText = data.pin;
-        });
-
+        // Clear files only clears Receive view (since Send has no visible file list for laptop)
         socket.on('clear_files', () => {
             document.getElementById('file-list').innerHTML = '<p style="color:#555; font-style:italic;">No files yet...</p>';
-            document.getElementById('qr-share-section').style.display = 'none';
         });
 
         // VIEW NAVIGATION
@@ -335,9 +374,10 @@ HTML_TEMPLATE = """
         function openReceive() {
             document.getElementById('home-view').style.display = 'none';
             document.getElementById('receive-view').style.display = 'block';
-            // Automatically fetch and show Receive QR when opened
-            fetch('/api/qr/receive').then(r=>r.json()).then(data => {
-                document.getElementById('laptop-pin').innerText = data.pin;
+            
+            // Generate Fresh Receive PIN explicitly
+            fetch('/api/qr/receive?reset=1').then(r=>r.json()).then(data => {
+                document.getElementById('receive-pin').innerText = data.pin;
                 document.getElementById('qr-receive-img').src = data.qr;
             });
         }
@@ -345,10 +385,13 @@ HTML_TEMPLATE = """
         function openSend() {
             document.getElementById('home-view').style.display = 'none';
             document.getElementById('send-view').style.display = 'block';
-            // Reset state
+            
+            // Clean slate for Send view
             document.getElementById('choose-file-btn').style.display = 'block';
             document.getElementById('processing-state').style.display = 'none';
             document.getElementById('qr-share-section').style.display = 'none';
+            // Generating base state (no QR shown until upload)
+            fetch('/api/qr/share?reset=1'); 
         }
 
         // DOWNLOAD & SHARE QR FUNCTIONS
@@ -368,21 +411,14 @@ HTML_TEMPLATE = """
                 let file = new File([blob], "Vault_QR.png", {type: "image/png"});
                 
                 if (navigator.share) {
-                    await navigator.share({
-                        title: 'Vault QR Code',
-                        text: 'Scan this QR to securely transfer files.',
-                        files: [file]
-                    });
+                    await navigator.share({ title: 'Vault QR Code', files: [file] });
                 } else {
-                    alert("Sharing is not supported on this browser/device.");
+                    alert("Sharing is not supported on this browser.");
                 }
-            } catch (err) {
-                console.error(err);
-                alert("Error sharing the QR code.");
-            }
+            } catch (err) { alert("Error sharing the QR code."); }
         }
 
-        // LAPTOP TO PHONE UPLOAD
+        // LAPTOP TO PHONE UPLOAD (SEND VIEW)
         function uploadToPhone() {
             let files = document.getElementById('share-input').files;
             if(!files.length) return;
@@ -392,9 +428,10 @@ HTML_TEMPLATE = """
             let progressContainer = document.getElementById('laptop-progress');
             let progressText = document.getElementById('laptop-progress-text');
             
+            // Hide previous QR and PIN, show loader
             btn.style.display = 'none';
             document.getElementById('qr-share-section').style.display = 'none'; 
-            processState.style.display = 'block'; // SHOW "WAIT ON THE PROCESS"
+            processState.style.display = 'block'; 
 
             let fd = new FormData();
             for(let i=0; i<files.length; i++) fd.append('files', files[i]);
@@ -411,17 +448,20 @@ HTML_TEMPLATE = """
             };
 
             xhr.onload = function() {
-                // Upload done -> Automatically generate and show QR
+                // File Uploaded! Backend sends NEW PIN and NEW QR directly
+                let res = JSON.parse(xhr.responseText);
+                
                 processState.style.display = 'none';
                 progressText.innerText = "0%";
                 progressContainer.style.background = `conic-gradient(var(--orange) 0%, #222 0%)`;
                 btn.style.display = 'block';
                 
-                // Fetch the new QR (since backend changed PIN on file upload)
-                fetch('/api/qr/share').then(r=>r.json()).then(data => {
-                    document.getElementById('qr-share-img').src = data.qr;
-                    document.getElementById('qr-share-section').style.display = 'block';
-                });
+                // SHOW NEW PIN AND QR IMMEDIATELY ON SEND SCREEN
+                document.getElementById('send-pin').innerText = res.pin;
+                document.getElementById('qr-share-img').src = res.qr;
+                document.getElementById('qr-share-section').style.display = 'block';
+                
+                document.getElementById('success-modal').style.display = 'flex';
             };
             xhr.send(fd);
         }
@@ -433,6 +473,7 @@ HTML_TEMPLATE = """
         });
 
         socket.on('file_completed', (data) => {
+            // Only affects Receive View
             let list = document.getElementById('file-list');
             if(list.innerText.includes('No files')) list.innerHTML = '';
             
@@ -458,7 +499,7 @@ HTML_TEMPLATE = """
     </script>
 
     {% elif mode == 'phone_auth' %}
-    <!-- PHONE UI (Keep standard styling for mobile upload/download) -->
+    <!-- PHONE UI -->
     <style>
         .phone-container { width: 100%; max-width: 400px; margin: 20px auto; }
         .pin-input { font-size: 2rem; width: 180px; text-align: center; background: #111; color: var(--cyan); border: 2px solid var(--cyan); border-radius: 8px; padding: 10px; margin: 20px 0; outline: none; }
@@ -469,6 +510,7 @@ HTML_TEMPLATE = """
     <div style="text-align:center; width:100%;">
         <div id="step-1" class="phone-container box box-cyan">
             <h1 style="color:var(--cyan);">CYBER VAULT</h1>
+            <p style="color:#aaa; font-size: 0.9rem; margin-top:10px;">Enter the PIN shown on the Laptop</p>
             <input type="number" id="pin-input" class="pin-input" placeholder="****">
             <button class="btn" onclick="verifyPin()">UNLOCK SYSTEM</button>
         </div>
@@ -511,20 +553,21 @@ HTML_TEMPLATE = """
 
     <script>
         const socket = io();
-        const actionType = "{{ phone_action }}";
+        const actionType = "{{ phone_action }}"; // either 'receive' or 'share'
 
         function verifyPin() {
             let pin = document.getElementById('pin-input').value;
             fetch('/api/verify_pin', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({pin: pin})
+                // Sending Action Type so backend knows which PIN to check
+                body: JSON.stringify({pin: pin, action: actionType}) 
             }).then(r=>r.json()).then(data => {
                 if(data.status === 'success') {
                     document.getElementById('step-1').style.display = 'none';
                     document.getElementById('step-2').style.display = 'block';
                     if(actionType === 'share') fetchSharedFiles(); 
-                } else alert("INVALID PIN OR SESSION EXPIRED. PLEASE SCAN LATEST QR.");
+                } else alert("INCORRECT PIN OR EXPIRED. PLEASE CHECK THE LAPTOP SCREEN.");
             });
         }
 
@@ -577,7 +620,7 @@ HTML_TEMPLATE = """
                 };
 
                 xhr.onload = () => {
-                    alert("Files Uploaded Successfully! 🚀");
+                    alert("Files Sent to Laptop Successfully! 🚀");
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('progress-text').innerText = "0%";
                     document.getElementById('progress-container').style.background = `conic-gradient(var(--cyan) 0%, #222 0%)`;
